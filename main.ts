@@ -1,46 +1,54 @@
-// news-image-20261124 entry program (Node 22, standard library only).
+// The World Today — 24 November 2026 · make.fun news-image-20261124
 //
-// The picture itself is drawn by draw.py (Python + Pillow, no network, no
-// external assets). Its output is a 1024x1024 PNG, carried in this
-// repository as entry.b64 — the same bytes, base64-encoded in long lines —
-// so the repository stays plain text end to end. All this program does is
-// deliver the picture to the grader: it decodes entry.b64 and writes the
-// PNG to <output>/entry.png, where <output> is /output in the grading
-// container, or $MAKEFUN_OUTPUT_DIR when run locally:
+// How this entry works: the front page itself is drawn by draw.py and
+// stored in this folder as entry.b64 (base64 text, wrapped so the
+// repository stays plain text). This program is the delivery step —
+// it unfolds that text back into the exact PNG bytes, sanity-checks
+// them, and drops the picture where the grader expects it:
 //
-//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+//   MAKEFUN_OUTPUT_DIR=<dir> node main.ts      (local runs)
+//   node main.ts                               (grader: /output)
 //
-// Base64 decoding is exact, so two runs always write identical bytes.
+// Node 22, standard library only, no network. Running it twice
+// always produces byte-identical output.
 
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const outputDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
-const source = new URL('./entry.b64', import.meta.url);
-const target = join(outputDir, 'entry.png');
+const here = dirname(fileURLToPath(import.meta.url));
 
-const encoded = readFileSync(source, 'utf8').replace(/\s+/g, '');
-const picture = Buffer.from(encoded, 'base64');
+// --- unfold the picture -------------------------------------------------
 
-// The gate accepts only a whole image, so prove the decoded bytes are the
-// complete PNG (magic header plus the IEND trailer) before writing.
-const pngMagic =
-  picture.length > 20 &&
-  picture[0] === 0x89 && picture[1] === 0x50 &&
-  picture[2] === 0x4e && picture[3] === 0x47;
-const pngTrailer = picture.subarray(picture.length - 8).includes('IEND');
-if (!pngMagic || !pngTrailer) {
-  throw new Error('entry.b64 does not decode to a complete PNG');
+const encoded = readFileSync(join(here, 'entry.b64'), 'utf8');
+const png = Buffer.from(encoded.replace(/\s+/g, ''), 'base64');
+
+if (png.length === 0) {
+  throw new Error('entry.b64 decoded to nothing');
 }
 
-// The grader hands us a writable /output, but create the directory anyway
-// so a local run works without a separate mkdir step.
-mkdirSync(outputDir, { recursive: true });
-writeFileSync(target, picture);
+// --- sanity-check the bytes before handing them over --------------------
 
-// Prove the delivered file is the whole picture before exiting.
-const delivered = statSync(target).size;
-if (delivered !== picture.length) {
-  throw new Error(`entry.png write incomplete: ${delivered} of ${picture.length} bytes`);
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+for (let i = 0; i < PNG_SIGNATURE.length; i += 1) {
+  if (png[i] !== PNG_SIGNATURE[i]) {
+    throw new Error(`not a PNG: signature byte ${i} is wrong`);
+  }
 }
-console.log(`entry.png delivered: ${delivered} bytes`);
+
+// A well-formed PNG ends with the twelve-byte IEND chunk:
+// length 0, the letters IEND, then its CRC.
+const tail = png.subarray(png.length - 12);
+const iendOk =
+  tail.readUInt32BE(0) === 0 && tail.toString('ascii', 4, 8) === 'IEND';
+if (!iendOk) {
+  throw new Error('truncated PNG: IEND trailer missing');
+}
+
+// --- deliver --------------------------------------------------------------
+
+const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+mkdirSync(outDir, { recursive: true });
+const target = join(outDir, 'entry.png');
+writeFileSync(target, png);
+console.log(`entry.png written to ${target} (${png.length} bytes)`);
